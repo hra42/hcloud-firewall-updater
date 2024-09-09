@@ -1,8 +1,10 @@
 #!/bin/bash
 
-# Function to get the current public IP address
-get_public_ip() {
-    curl -s https://api.ipify.org
+# Function to get the current public IP addresses
+get_public_ips() {
+    local ipv4=$(curl -s https://api.ipify.org)
+    local ipv6=$(curl -s -6 https://api6.ipify.org)
+    echo "$ipv4 $ipv6"
 }
 
 # Function to get the firewall ID
@@ -14,7 +16,8 @@ get_firewall_id() {
 # Function to update the firewall rule
 update_firewall() {
     local firewall_id="$1"
-    local current_ip="$2"
+    local current_ipv4="$2"
+    local current_ipv6="$3"
 
     # Get the existing rules
     local rules=$(hcloud firewall describe "$firewall_id" -o json | jq -r '.rules')
@@ -23,41 +26,59 @@ update_firewall() {
     local ssh_rule=$(echo "$rules" | jq -r '.[] | select(.description == "SSH")')
 
     if [ -z "$ssh_rule" ]; then
-        echo "No rule with description 'SSH' found. Adding a new rule."
+        echo "No rule with description 'SSH' found. Adding new rules."
         hcloud firewall add-rule "$firewall_id" \
-            --description "SSH" \
+            --description "SSH IPv4" \
             --direction in \
             --protocol tcp \
             --port 22 \
-            --source-ips "$current_ip/32"
+            --source-ips "$current_ipv4/32"
+
+        if [ -n "$current_ipv6" ]; then
+            hcloud firewall add-rule "$firewall_id" \
+                --description "SSH IPv6" \
+                --direction in \
+                --protocol tcp \
+                --port 22 \
+                --source-ips "$current_ipv6/128"
+        fi
     else
         # Extract the existing rule details
         local direction=$(echo "$ssh_rule" | jq -r '.direction')
         local port=$(echo "$ssh_rule" | jq -r '.port')
         local protocol=$(echo "$ssh_rule" | jq -r '.protocol')
-        local old_ips=$(echo "$ssh_rule" | jq -r '.source_ips | join(",")')
 
-        # Check if the current IP is already the only IP in the rule
-        if [ "$old_ips" = "$current_ip/32" ]; then
-            echo "Current IP is already the only IP in the firewall rule. No update needed."
-            return
+        # Prepare the rules JSON
+        local rules_json="[
+            {
+                \"description\": \"SSH IPv4\",
+                \"direction\": \"$direction\",
+                \"protocol\": \"$protocol\",
+                \"port\": \"$port\",
+                \"source_ips\": [
+                    \"$current_ipv4/32\"
+                ]
+            }"
+
+        if [ -n "$current_ipv6" ]; then
+            rules_json="$rules_json,
+            {
+                \"description\": \"SSH IPv6\",
+                \"direction\": \"$direction\",
+                \"protocol\": \"$protocol\",
+                \"port\": \"$port\",
+                \"source_ips\": [
+                    \"$current_ipv6/128\"
+                ]
+            }"
         fi
 
-        # Update the rule with only the new IP
-        hcloud firewall set-rules "$firewall_id" \
-            --rules-file <(echo "[
-                {
-                    \"description\": \"SSH\",
-                    \"direction\": \"$direction\",
-                    \"protocol\": \"$protocol\",
-                    \"port\": \"$port\",
-                    \"source_ips\": [
-                        \"$current_ip/32\"
-                    ]
-                }
-            ]")
+        rules_json="$rules_json]"
 
-        echo "Firewall rule updated. Old IP(s) removed, new IP added."
+        # Update the rules
+        echo "$rules_json" | hcloud firewall set-rules "$firewall_id" --rules-file -
+
+        echo "Firewall rules updated. Old IP(s) removed, new IP(s) added."
     fi
 }
 
@@ -81,17 +102,24 @@ fi
 
 echo "Found firewall with ID: $FIREWALL_ID"
 
-# Get the current public IP
-CURRENT_IP=$(get_public_ip)
+# Get the current public IP addresses
+IPS=$(get_public_ips)
+CURRENT_IPV4=$(echo $IPS | cut -d' ' -f1)
+CURRENT_IPV6=$(echo $IPS | cut -d' ' -f2)
 
-if [ -z "$CURRENT_IP" ]; then
-    echo "Failed to get current IP address"
+if [ -z "$CURRENT_IPV4" ]; then
+    echo "Failed to get current IPv4 address"
     exit 1
 fi
 
-echo "Current IP: $CURRENT_IP"
+echo "Current IPv4: $CURRENT_IPV4"
+if [ -n "$CURRENT_IPV6" ]; then
+    echo "Current IPv6: $CURRENT_IPV6"
+else
+    echo "No IPv6 address detected"
+fi
 
 # Update the firewall
-update_firewall "$FIREWALL_ID" "$CURRENT_IP"
+update_firewall "$FIREWALL_ID" "$CURRENT_IPV4" "$CURRENT_IPV6"
 
 echo "Firewall update process completed"
