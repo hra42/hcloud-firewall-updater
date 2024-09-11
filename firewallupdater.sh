@@ -1,95 +1,95 @@
 #!/bin/bash
 
-# Function to get the current public IP addresses
-get_public_ips() {
-    local ipv4=$(curl -s https://api.ipify.org)
-    local ipv6=$(curl -s -6 https://api6.ipify.org)
-    echo "$ipv4 $ipv6"
+# Check if an argument is provided
+if [ $# -eq 0 ]; then
+    echo "Please provide an environment argument (e.g., Prod)"
+    exit 1
+fi
+
+ENVIRONMENT=$1
+FIREWALL_ID=15388  # The firewall ID from your output
+
+# Function to get current IP addresses
+get_current_ips() {
+    IPV4=$(curl -s https://ipv4.icanhazip.com)
+    IPV6=$(curl -s https://ipv6.icanhazip.com)
+    echo "Current IPv4: $IPV4"
+    echo "Current IPv6: $IPV6"
 }
 
-# Function to get the firewall ID
-get_firewall_id() {
-    local firewall_name="$1"
-    hcloud firewall list -o json | jq -r ".[] | select(.name == \"$firewall_name\") | .id"
+# Function to get existing SSH rule IPs
+get_existing_ssh_rule_ips() {
+    EXISTING_RULES=$(hcloud firewall describe $FIREWALL_ID -o json)
+    EXISTING_IPV4=$(echo "$EXISTING_RULES" | jq -r '.rules[] | select(.direction=="in" and .protocol=="tcp" and .port=="22" and (.source_ips | length == 1)) | .source_ips[0]' | sed -n 's/^\([0-9.]*\)\/32$/\1/p')
+    EXISTING_IPV6=$(echo "$EXISTING_RULES" | jq -r '.rules[] | select(.direction=="in" and .protocol=="tcp" and .port=="22" and (.source_ips | length == 1)) | .source_ips[0]' | sed -n 's/^\([0-9a-fA-F:]*\)\/128$/\1/p')
+    echo "Existing SSH rule IPv4: $EXISTING_IPV4"
+    echo "Existing SSH rule IPv6: $EXISTING_IPV6"
 }
 
-# Function to update the firewall rule
-update_firewall() {
-    local firewall_id="$1"
-    local current_ipv4="$2"
-    local current_ipv6="$3"
+# Function to check if IPs have changed
+ips_have_changed() {
+    if [ "$IPV4" != "$EXISTING_IPV4" ] || [ "$IPV6" != "$EXISTING_IPV6" ]; then
+        return 0  # IPs have changed
+    else
+        return 1  # IPs have not changed
+    fi
+}
 
-    # Prepare the new rules JSON
-    local rules_json="[
-        {
-            \"description\": \"SSH IPv4\",
-            \"direction\": \"in\",
-            \"protocol\": \"tcp\",
-            \"port\": \"22\",
-            \"source_ips\": [
-                \"$current_ipv4/32\"
-            ]
-        }"
+# Function to update SSH rules
+update_ssh_rules() {
+    # Get all existing rules
+    EXISTING_RULES=$(hcloud firewall describe $FIREWALL_ID -o json | jq '.rules')
 
-    if [ -n "$current_ipv6" ]; then
-        rules_json="$rules_json,
+    # Remove existing SSH rules
+    NEW_RULES=$(echo "$EXISTING_RULES" | jq '[.[] | select(.port != "22" or .protocol != "tcp" or .direction != "in")]')
+
+    # Add new SSH rules
+    NEW_RULES=$(echo "$NEW_RULES" | jq '. += [
         {
-            \"description\": \"SSH IPv6\",
-            \"direction\": \"in\",
-            \"protocol\": \"tcp\",
-            \"port\": \"22\",
-            \"source_ips\": [
-                \"$current_ipv6/128\"
-            ]
-        }"
+            "direction": "in",
+            "protocol": "tcp",
+            "port": "22",
+            "source_ips": ["'"$IPV4"'/32"],
+            "description": "Allow SSH from current IPv4"
+        }
+    ]')
+
+    if [ ! -z "$IPV6" ]; then
+        NEW_RULES=$(echo "$NEW_RULES" | jq '. += [
+            {
+                "direction": "in",
+                "protocol": "tcp",
+                "port": "22",
+                "source_ips": ["'"$IPV6"'/128"],
+                "description": "Allow SSH from current IPv6"
+            }
+        ]')
     fi
 
-    rules_json="$rules_json]"
+    # Create a temporary file for the rules
+    RULES_FILE=$(mktemp)
+    echo "$NEW_RULES" > "$RULES_FILE"
 
-    # Update the rules, replacing all existing rules
-    echo "$rules_json" | hcloud firewall set-rules "$firewall_id" --rules-file -
+    # Apply the updated rules
+    hcloud firewall replace-rules $FIREWALL_ID --rules-file "$RULES_FILE"
 
-    echo "Firewall rules updated. Old rules removed, new rules with current IP(s) added."
+    # Remove the temporary file
+    rm "$RULES_FILE"
+
+    echo "Firewall SSH rules updated. Old SSH rules replaced with new rules for current IP(s)."
 }
 
-# Main script
-
-# Check if a firewall name is provided
-if [ $# -eq 0 ]; then
-    echo "Usage: $0 <firewall_name>"
-    exit 1
-fi
-
-FIREWALL_NAME="$1"
-
-# Get the firewall ID
-FIREWALL_ID=$(get_firewall_id "$FIREWALL_NAME")
-
-if [ -z "$FIREWALL_ID" ]; then
-    echo "No firewall found with the name: $FIREWALL_NAME"
-    exit 1
-fi
-
+# Main execution
+echo "Checking firewall for $ENVIRONMENT environment"
 echo "Found firewall with ID: $FIREWALL_ID"
 
-# Get the current public IP addresses
-IPS=$(get_public_ips)
-CURRENT_IPV4=$(echo $IPS | cut -d' ' -f1)
-CURRENT_IPV6=$(echo $IPS | cut -d' ' -f2)
+get_current_ips
+get_existing_ssh_rule_ips
 
-if [ -z "$CURRENT_IPV4" ]; then
-    echo "Failed to get current IPv4 address"
-    exit 1
-fi
-
-echo "Current IPv4: $CURRENT_IPV4"
-if [ -n "$CURRENT_IPV6" ]; then
-    echo "Current IPv6: $CURRENT_IPV6"
+if ips_have_changed; then
+    echo "IP address(es) have changed. Updating SSH rules..."
+    update_ssh_rules
+    echo "Firewall update process completed"
 else
-    echo "No IPv6 address detected"
+    echo "IP addresses have not changed. No update needed."
 fi
-
-# Update the firewall
-update_firewall "$FIREWALL_ID" "$CURRENT_IPV4" "$CURRENT_IPV6"
-
-echo "Firewall update process completed"
