@@ -19,67 +19,37 @@ update_firewall() {
     local current_ipv4="$2"
     local current_ipv6="$3"
 
-    # Get the existing rules
-    local rules=$(hcloud firewall describe "$firewall_id" -o json | jq -r '.rules')
+    # Prepare the new rules JSON
+    local rules_json="[
+        {
+            \"description\": \"SSH IPv4\",
+            \"direction\": \"in\",
+            \"protocol\": \"tcp\",
+            \"port\": \"22\",
+            \"source_ips\": [
+                \"$current_ipv4/32\"
+            ]
+        }"
 
-    # Find the SSH rule
-    local ssh_rule=$(echo "$rules" | jq -r '.[] | select(.description == "SSH")')
-
-    if [ -z "$ssh_rule" ]; then
-        echo "No rule with description 'SSH' found. Adding new rules."
-        hcloud firewall add-rule "$firewall_id" \
-            --description "SSH IPv4" \
-            --direction in \
-            --protocol tcp \
-            --port 22 \
-            --source-ips "$current_ipv4/32"
-
-        if [ -n "$current_ipv6" ]; then
-            hcloud firewall add-rule "$firewall_id" \
-                --description "SSH IPv6" \
-                --direction in \
-                --protocol tcp \
-                --port 22 \
-                --source-ips "$current_ipv6/128"
-        fi
-    else
-        # Extract the existing rule details
-        local direction=$(echo "$ssh_rule" | jq -r '.direction')
-        local port=$(echo "$ssh_rule" | jq -r '.port')
-        local protocol=$(echo "$ssh_rule" | jq -r '.protocol')
-
-        # Prepare the rules JSON
-        local rules_json="[
-            {
-                \"description\": \"SSH IPv4\",
-                \"direction\": \"$direction\",
-                \"protocol\": \"$protocol\",
-                \"port\": \"$port\",
-                \"source_ips\": [
-                    \"$current_ipv4/32\"
-                ]
-            }"
-
-        if [ -n "$current_ipv6" ]; then
-            rules_json="$rules_json,
-            {
-                \"description\": \"SSH IPv6\",
-                \"direction\": \"$direction\",
-                \"protocol\": \"$protocol\",
-                \"port\": \"$port\",
-                \"source_ips\": [
-                    \"$current_ipv6/128\"
-                ]
-            }"
-        fi
-
-        rules_json="$rules_json]"
-
-        # Update the rules
-        echo "$rules_json" | hcloud firewall set-rules "$firewall_id" --rules-file -
-
-        echo "Firewall rules updated. Old IP(s) removed, new IP(s) added."
+    if [ -n "$current_ipv6" ]; then
+        rules_json="$rules_json,
+        {
+            \"description\": \"SSH IPv6\",
+            \"direction\": \"in\",
+            \"protocol\": \"tcp\",
+            \"port\": \"22\",
+            \"source_ips\": [
+                \"$current_ipv6/128\"
+            ]
+        }"
     fi
+
+    rules_json="$rules_json]"
+
+    # Update the rules, replacing all existing rules
+    echo "$rules_json" | hcloud firewall set-rules "$firewall_id" --rules-file -
+
+    echo "Firewall rules updated. Old rules removed, new rules with current IP(s) added."
 }
 
 # Main script
